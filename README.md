@@ -32,7 +32,10 @@ can be off, and it **stops by itself** once there is nothing left to watch.
 ## What it does
 
 - Checks your PNR on a schedule and compares it with the last status it saw.
-- Sends a phone push (via [ntfy](https://ntfy.sh)) **only when something changes**. No change means silence.
+- Sends a loud phone push (via [ntfy](https://ntfy.sh)) **when something changes**.
+- After every check with no change, drops a **silent** note in the ntfy app ("Checked 10:20 PM: WL 34 (no
+  change)"), so you can always tell "nothing changed" apart from "the checks stopped running".
+  See [Is it still running?](#is-it-still-running).
 - Checks rarely when the journey is far away and **every 10 minutes during the two chart preparations**
   (about 4 h and 2 h before departure), when waitlists move the most.
 - Never exceeds the free API plan: it has a monthly call budget with calls held back for the chart windows.
@@ -129,6 +132,26 @@ What it looked like on 5 Nov:
 Polling also ends early if the ticket is **confirmed** or **cancelled**: you get that push and the workflow
 disables itself.
 
+### Is it still running?
+
+**The problem:** without a change there used to be no push, so silence could mean either "nothing changed"
+or "the checks stopped" (which really happened once: GitHub's cron didn't fire for 4 hours and a drop went
+unnoticed).
+
+**The fix:** after every API check that finds no change, the script sends a **minimum-priority** ntfy
+message such as `Checked 10:20 PM: WL 34 (no change)`. It makes no sound and shows no popup; it just sits
+in the ntfy app. Real changes still arrive as loud, high-priority pushes.
+
+**How to use it:** whenever you wonder, open the ntfy app and look at the newest "Checked" note:
+
+| Last "Checked" note is... | Meaning |
+|---|---|
+| under about 1 h old (under about 10 min on chart day) | working; the status really hasn't changed |
+| clearly older than that | checks have stopped: look at cron-job.org's History, then GitHub's Actions tab |
+
+Only wake-ups that actually call the API send a note, so expect one an hour normally and one every 10
+minutes in the chart windows, not one per wake-up. Set `HEARTBEAT=0` to turn the notes off.
+
 ### Without `BASE_POLL_MINUTES`
 
 Without `BASE_POLL_MINUTES` the early phases are slower (24 h, 12 h, 6 h, 3 h, 1 h), which suits a ticket
@@ -150,7 +173,8 @@ When the budget is reached you get one "API quota used up" push and the script s
 | Situation | What the script does | Phone push |
 |---|---|---|
 | First ever check | Records the status | "Tracking started: WL 35" |
-| Nothing changed | Saves the time of the check | none |
+| Nothing changed | Saves the time of the check | **silent** "Checked 10:20 PM: WL 34 (no change)" (no sound or popup; turn off with `HEARTBEAT=0`) |
+| Wake-up but no check due | Exits without calling the API | none |
 | Waitlist number drops (WL 35 to WL 28) | Records the new number | "Waitlist dropped! WL 35 -> WL 28" |
 | Waitlist number goes up | Records it | "Waitlist went up" |
 | WL moves to RAC | Records it | "Moved to RAC!" |
@@ -182,7 +206,7 @@ When the budget is reached you get one "API quota used up" push and the script s
 | State between runs | `actions/cache` + `state.json` | free, no database |
 | Secrets | GitHub Actions Secrets | key, PNR, topic never in the code |
 | Self-shutdown | `gh workflow disable` from the job | stops runs when the ticket is resolved |
-| Tests | `pytest` (28 tests) | schedule, budget, parsing, failure handling |
+| Tests | `pytest` (32 tests) | schedule, budget, parsing, failure handling, heartbeat |
 | Demo | Pillow (dev only) | generates `docs/demo.gif` |
 
 ## Project layout
@@ -197,6 +221,7 @@ pnr-alert/
 ├── test_failures.py                # named failure pushes, rate limit, recovery
 ├── test_base_poll.py               # hourly mode and quota maths
 ├── test_env_bom.py                 # Windows BOM handling for .env and secrets
+├── test_heartbeat.py               # silent "no change" notes
 └── docs/
     ├── demo.gif                    # animated demo shown above
     └── make_demo_gif.py            # regenerates the GIF
@@ -295,6 +320,7 @@ Local runs read `.env`. In the cloud the same names come from the workflow file 
 | `MONTHLY_BUDGET` | no | 90 | stop calling the API after this many calls in a month (cloud uses `85`) |
 | `CHART_RESERVE` | no | 15 | calls held back for the chart windows |
 | `CHECK_TICK_MINUTES` | no | 5 | how often `--loop` wakes up locally (free) |
+| `HEARTBEAT` | no | on | `0` turns off the silent "Checked ...: no change" notes |
 | `TZ_OFFSET_MINUTES` | no | 330 | timezone of `DEPARTURE` as minutes from UTC (330 = India); the cloud runs in UTC |
 
 ## Command reference
@@ -312,7 +338,7 @@ Local runs read `.env`. In the cloud the same names come from the workflow file 
 
 ```powershell
 pip install pytest
-python -m pytest -q        # 28 tests, none of them call the real API
+python -m pytest -q        # 32 tests, none of them call the real API
 ```
 
 The tests cover status parsing, change detection, the polling schedule, hourly mode, the quota budget and
@@ -367,6 +393,7 @@ their rate limit, and BOM handling.
 | `API endpoint not found (HTTP 404)` | wrong path in `PNR_API_URL`; copy the URL from the provider's code snippet |
 | `Invalid PNR` push | typo in `PNR`, or the secret has extra characters; re-enter it |
 | No phone push at all | topic name differs between the app and `NTFY_TOPIC`; run `--test-notify`; check notification and battery settings |
+| Last "Checked ..." note in the app is more than about 1.5 h old (10–20 min on chart day) | checks have stopped: see [Is it still running?](#is-it-still-running) |
 | `--once` prints nothing | normal: no check was due. Use `--once --force` to call now |
 | Workflow never runs by itself | GitHub's cron is unreliable; set up [cron-job.org](#reliable-scheduling-with-cron-joborg). Also check the workflow is not disabled |
 | cron-job.org shows 404 | method left as GET, `Authorization` header missing or wrong, or the token lacks access to this repo. Opening the URL in a browser always gives 404 (it is POST-only) |

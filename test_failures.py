@@ -12,7 +12,7 @@ def setup(monkeypatch, tmp_path, fetch):
     sent = []
     monkeypatch.setattr(p, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(p, "fetch_statuses", fetch)
-    monkeypatch.setattr(p, "notify", lambda title, msg, tags="": sent.append((title, msg)))
+    monkeypatch.setattr(p, "notify", lambda title, msg, tags="", **kw: sent.append((title, msg)))
     monkeypatch.setenv("DEPARTURE", DEP.isoformat(sep=" "))
     return sent
 

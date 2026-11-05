@@ -159,7 +159,8 @@ def fetch_statuses(pnr: str) -> list[str]:
 
 
 # ------------------------------------------------------------- notify
-def notify(title: str, message: str, tags: str = "tada") -> None:
+def notify(title: str, message: str, tags: str = "tada", priority: str = "high") -> None:
+    """priority: 'high' buzzes the phone; 'min' lands silently in the ntfy app (no sound, no popup)."""
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
         print(f"[no NTFY_TOPIC set] {title}: {message}")
@@ -168,7 +169,7 @@ def notify(title: str, message: str, tags: str = "tada") -> None:
     r = requests.post(
         f"{server}/{topic}",
         data=message.encode("utf-8"),
-        headers={"Title": title, "Tags": tags, "Priority": "high"},
+        headers={"Title": title, "Tags": tags, "Priority": priority},
         timeout=15,
     )
     r.raise_for_status()
@@ -364,6 +365,16 @@ def spend_budget(state: dict, reserve: int = 0) -> bool:
     return True
 
 
+def heartbeat_text(statuses: list[str]) -> str:
+    """'Checked 10:20 PM: WL 34 (no change)'; time is in the ticket's timezone (IST by default)."""
+    when = _now().strftime("%I:%M %p").lstrip("0")
+    if len(statuses) == 1:
+        now_s = describe(statuses[0])
+    else:
+        now_s = " | ".join(f"P{i + 1} {describe(s)}" for i, s in enumerate(statuses))
+    return f"Checked {when}: {now_s} (no change)"
+
+
 def check_once(pnr: str, statuses: list[str] | None = None) -> None:
     statuses = statuses if statuses is not None else fetch_statuses(pnr)
     state = load_state()
@@ -372,13 +383,18 @@ def check_once(pnr: str, statuses: list[str] | None = None) -> None:
     if previous is None:  # first run: just report where we are
         notify("Tracking started", " | ".join(describe(s) for s in statuses), "eyes")
     else:
+        changed = False
         for i, new in enumerate(statuses):
             old = previous[i] if i < len(previous) else new
             change = compare(old, new)
             if change:
+                changed = True
                 title, msg, tags = change
                 who = f"P{i + 1}: " if len(statuses) > 1 else ""
                 notify(title, who + msg, tags)
+        if not changed and os.environ.get("HEARTBEAT", "1") != "0":
+            # Silent "still alive" note, so silence never has to mean "maybe it stopped running"
+            notify("Checked: no change", heartbeat_text(statuses), "hourglass", priority="min")
     state[pnr] = statuses
     kinds = [parse_status(s)[0] for s in statuses]
     if kinds and all(k in ("CNF", "CANCELLED") for k in kinds):  # nothing left to wait for
