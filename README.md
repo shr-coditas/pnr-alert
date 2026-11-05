@@ -177,7 +177,7 @@ When the budget is reached you get one "API quota used up" push and the script s
 | HTTP | `requests` | calling the PNR API and ntfy |
 | PNR data | **RapidAPI** IRCTC / PNR status API (free "Basic" plan) | there is no official public API and IRCTC has captchas; any provider whose JSON has a `currentStatus` field works |
 | Phone push | **[ntfy.sh](https://ntfy.sh)** | free, no account, one HTTP POST |
-| Hosting | **GitHub Actions** (private repo) | free, runs while your laptop is off |
+| Hosting | **GitHub Actions** (public repo) | free with unlimited minutes, runs while your laptop is off |
 | Scheduler | **[cron-job.org](https://cron-job.org)** calling `workflow_dispatch` every 10 min, plus GitHub cron `*/10 * * * *` as backup | GitHub's own cron did not fire reliably (see [below](#reliable-scheduling-with-cron-joborg)) |
 | State between runs | `actions/cache` + `state.json` | free, no database |
 | Secrets | GitHub Actions Secrets | key, PNR, topic never in the code |
@@ -245,12 +245,14 @@ Saving `.env`: use a plain editor or UTF-8 without BOM. The script now tolerates
 
 1. Install and log in to the [GitHub CLI](https://cli.github.com): `winget install --id GitHub.cli`,
    open a **new** terminal, then `gh auth login`.
-2. Create a **private** repo and push:
+2. Create a repo and push (public or private; see [Security and privacy](#security-and-privacy) for the
+   difference):
    ```powershell
    git init -b main; git add -A; git commit -m "PNR alert"
-   gh repo create pnr-alert --private --source . --push
+   gh repo create pnr-alert --public --source . --push     # or --private
    ```
-   `.env` and `state.json` are in `.gitignore`, so they are not uploaded.
+   `.env` and `state.json` are in `.gitignore`, so they are not uploaded. Before going public, make sure no
+   secret was ever committed: a public repo exposes the whole git history, not just the latest files.
 3. Add the five secrets. The safest way is the website: **Repo, Settings, Secrets and variables, Actions,
    New repository secret**. Names and values:
 
@@ -320,15 +322,18 @@ their rate limit, and BOM handling.
 ## Security and privacy
 
 - Secrets live in GitHub Secrets or your local `.env`, which is git-ignored. Do not commit them.
-- Use a **private** repo. Secrets (PNR, API key, ntfy topic) are hidden in either case, and the script masks
-  your PNR in its log output (for example `12******90`). But in a **public** repo anyone can read the
-  Actions history and logs: your waitlist status and every change ("WL 35 -> WL 34"), and from the run
-  pattern (10-minute API checks start 4 h before departure) roughly when you travel. Private keeps all of
-  that to you.
-- Trade-off: private repos get **2,000 free Actions minutes a month** (public ones are unlimited). Each run
-  is billed as at least 1 minute, so waking every 10 minutes uses about **144 minutes a day**. That is fine
-  for a trip a few days away (about 13 days of runs fit), but for a ticket booked weeks ahead, set the
-  cron-job.org job to every 30 or 60 minutes until a day or two before departure.
+- **Public or private repo: both work, both are free.** This repo is **public**.
+  - **Hidden either way:** Secrets (PNR, API key, ntfy topic) are never shown, and the script masks the PNR
+    in logs (first 2 and last 2 digits only, e.g. `12******90`).
+  - **Visible to anyone in a public repo:** the code, and the Actions run history and logs. These show
+    your waitlist status and every change ("WL 35 -> WL 34") and, from the run pattern (10-minute API
+    checks start 4 h before departure), roughly when you travel. If that matters to you, use private.
+  - **Free minutes:** public repos get **unlimited** Actions minutes. Private repos get **2,000 a month**;
+    each run is billed as at least 1 minute, so waking every 10 minutes uses about **144 minutes a day**
+    (about 13 days of runs). For a private repo and a ticket booked weeks ahead, set the cron-job.org job
+    to every 30 or 60 minutes until a day or two before departure.
+  - **Before making a repo public**, check that no secret was ever committed: the whole git history
+    becomes public, and switching back to private later does not undo copies or forks made meanwhile.
 - Your PNR is sent to the API provider you choose. Pick one you are comfortable sharing ticket details with.
 - ntfy.sh topics are public by name. A long random topic is a password. Anyone who learns it can read your alerts.
 - Passenger names are never printed or stored by this tool.
