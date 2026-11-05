@@ -25,6 +25,7 @@ can be off, and it **stops by itself** once there is nothing left to watch.
 11. [Security and privacy](#security-and-privacy)
 12. [Limitations](#limitations)
 13. [Troubleshooting](#troubleshooting)
+14. [Reliable scheduling with cron-job.org](#reliable-scheduling-with-cron-joborg)
 
 ---
 
@@ -43,7 +44,8 @@ can be off, and it **stops by itself** once there is nothing left to watch.
 
 ```mermaid
 flowchart TD
-    A["GitHub Actions cron<br/>wakes every 10 min"] --> B{"Is a check due?<br/>schedule + API budget"}
+    A0["cron-job.org<br/>POST workflow_dispatch every 10 min<br/>(main trigger)"] --> B
+    A["GitHub Actions cron<br/>every 10 min (backup, best effort)"] --> B{"Is a check due?<br/>schedule + API budget"}
     B -- "no (most wake-ups)" --> Z["Exit. No API call."]
     B -- yes --> C["Call the PNR status API"]
     C --> D{"Result?"}
@@ -125,7 +127,8 @@ When the budget is reached you get one "API quota used up" push and the script s
 | HTTP | `requests` | calling the PNR API and ntfy |
 | PNR data | **RapidAPI** IRCTC / PNR status API (free "Basic" plan) | there is no official public API and IRCTC has captchas; any provider whose JSON has a `currentStatus` field works |
 | Phone push | **[ntfy.sh](https://ntfy.sh)** | free, no account, one HTTP POST |
-| Scheduler and hosting | **GitHub Actions** (cron `*/10 * * * *`, private repo) | free, runs while your laptop is off |
+| Hosting | **GitHub Actions** (private repo) | free, runs while your laptop is off |
+| Scheduler | **[cron-job.org](https://cron-job.org)** calling `workflow_dispatch` every 10 min, plus GitHub cron `*/10 * * * *` as backup | GitHub's own cron did not fire reliably (see [below](#reliable-scheduling-with-cron-joborg)) |
 | State between runs | `actions/cache` + `state.json` | free, no database |
 | Secrets | GitHub Actions Secrets | key, PNR, topic never in the code |
 | Self-shutdown | `gh workflow disable` from the job | stops runs when the ticket is resolved |
@@ -213,8 +216,10 @@ Saving `.env`: use a plain editor or UTF-8 without BOM. The script now tolerates
    to `gh` can prepend a hidden BOM character, so set `$OutputEncoding = New-Object System.Text.UTF8Encoding $false`
    first or use the website.
 4. Run it once by hand: **Actions tab, pnr-alert, Run workflow** (or `gh workflow run pnr-alert.yml`). A green
-   run with "Tracking started" on your phone means it works. After that GitHub runs it by itself about
-   every 10 minutes (it can be a few minutes late; the first scheduled run on a new repo can take a while).
+   run with "Tracking started" on your phone means it works.
+5. **Set up the external trigger** described in
+   [Reliable scheduling with cron-job.org](#reliable-scheduling-with-cron-joborg). Do not rely on GitHub's
+   own cron alone: in practice it did not fire at all for hours.
 
 ### 5. Stopping and cleaning up
 - It disables itself when the ticket is confirmed or cancelled, the PNR is flushed, or the final chart is past.
@@ -279,7 +284,10 @@ their rate limit, and BOM handling.
   goes down, you will get a named failure push, but checks will fail until it is fixed. The script reads the
   per-passenger `currentStatusDetails` field (falling back to `currentStatus`); a provider that names it
   differently needs a small change in `find_current_statuses()`.
-- **GitHub cron is best effort.** Scheduled runs can be delayed. The script tolerates a few minutes.
+- **GitHub cron is best effort.** Scheduled runs can be delayed by hours or skipped entirely, which is why
+  cron-job.org is the main trigger. The script tolerates a few minutes of lateness from either trigger.
+- **cron-job.org is a third party.** It holds a GitHub token limited to this one repo's Actions. If the
+  service is down, the GitHub cron is the only (unreliable) backup.
 - **One PNR per deployment.** Track a second ticket with a second repo or by extending the script.
 - **Waitlists move because of cancellations and charts.** The tool cannot make the number drop faster.
 - **How cancellations are reported depends on the API.** It handles `CAN`, `FLUSH` and `REGRET` statuses
@@ -298,8 +306,112 @@ their rate limit, and BOM handling.
 | `Invalid PNR` push | typo in `PNR`, or the secret has extra characters; re-enter it |
 | No phone push at all | topic name differs between the app and `NTFY_TOPIC`; run `--test-notify`; check notification and battery settings |
 | `--once` prints nothing | normal: no check was due. Use `--once --force` to call now |
-| Workflow never runs by itself | first scheduled run can take a while; check the Actions tab; make sure the workflow is not disabled |
+| Workflow never runs by itself | GitHub's cron is unreliable; set up [cron-job.org](#reliable-scheduling-with-cron-joborg). Also check the workflow is not disabled |
+| cron-job.org shows 404 | method left as GET, `Authorization` header missing or wrong, or the token lacks access to this repo. Opening the URL in a browser always gives 404 (it is POST-only) |
+| cron-job.org shows 401 | token mistyped, expired, or `Bearer ` prefix missing |
+| cron-job.org shows 422 | the workflow is disabled (normal once the ticket is resolved); delete the cron job |
 | "Tracking started" again later | the cache expired or was cleared, so the baseline was lost; harmless |
 | Workflow shows red | open the run log; failures that reach the job (as opposed to API errors, which push) are usually a setup issue |
 | `PNR_API_URL is not set` / `PNR is not set` | `.env` missing or unreadable locally; or a Secret is missing in the cloud |
 | Wrong times in the cloud | check `TZ_OFFSET_MINUTES` and that `DEPARTURE` is in India time |
+
+## Reliable scheduling with cron-job.org
+
+### What went wrong
+
+On 5 Nov 2026 the PNR was at **WL 35** after the last manual run (11:37 UTC / 17:07 IST). The waitlist
+then dropped, but **no notification arrived**. Investigation showed:
+
+| Checked | Finding |
+|---|---|
+| Actions run history | only 5 runs, **all manual** (`workflow_dispatch`). **Zero** runs with event `schedule` in about 4 hours |
+| Workflow file | correct: `cron: "*/10 * * * *"` present, pushed to `main`, workflow state `active` |
+| Script logic | correct: `compare()` sends "Waitlist dropped!" for any drop; manual runs all worked |
+| IST handling | correct: at 15:30 UTC the script's clock read 21:00 IST (`TZ_OFFSET_MINUTES=330`), and `DEPARTURE` is read as IST |
+
+So **nothing was missing or broken in our code.** No check ran during those hours, so there was nothing to
+notice the drop. A drop is only reported when a check actually runs.
+
+### Why GitHub's cron didn't fire
+
+GitHub treats `on: schedule` as **best effort**. Scheduled runs are queued behind other jobs, can be delayed
+by an hour or more, can be **skipped entirely** (frequent crons like every 10 minutes are the most likely to
+be dropped), and new workflows can wait a long time before their first scheduled run. We can't see GitHub's
+side, so this is the most likely explanation rather than a confirmed one, but the effect is clear: GitHub's
+cron cannot be trusted for something time-sensitive like chart-window polling.
+
+### What we changed
+
+**The code and workflow did not change.** Only the thing that *starts* the workflow changed:
+
+| | Before | Now |
+|---|---|---|
+| Trigger | GitHub's own scheduler (`on: schedule`) | **cron-job.org** calls GitHub's API (`workflow_dispatch`) every 10 min |
+| Reliability | did not fire for 4+ hours | same mechanism as the manual runs, which worked every time |
+| Laptop needed? | no | no |
+| GitHub cron | main trigger | kept as a backup |
+
+Both triggers can run safely side by side: the script's "is a check due?" logic (last check time, schedule,
+budget) decides whether to call the API, so extra wake-ups cost **no API quota** and never double-poll.
+
+### Setup, step by step
+
+**Part 1: create a GitHub token**
+
+1. GitHub, **profile picture** (top right), **Settings**.
+2. Left sidebar, very bottom: **Developer settings**.
+3. **Personal access tokens**, **Fine-grained tokens**, **Generate new token**.
+4. Fill in:
+   - **Token name:** `pnr-alert-cron`
+   - **Expiration:** custom, a day after your trip.
+   - **Repository access:** **Only select repositories**, pick **pnr-alert**.
+   - **Permissions**, **Repository permissions**, **Actions:** **Read and write**. Leave everything else.
+5. **Generate token** and copy it (starts with `github_pat_`). GitHub shows it only once.
+
+**Part 2: create the job on cron-job.org**
+
+1. Sign up (free) at [cron-job.org](https://cron-job.org) and confirm your email.
+2. Account name (top right), **Account settings**, **Timezone:** **Asia/Kolkata**. Save.
+3. **Cronjobs**, **Create cronjob**.
+4. **Common** tab:
+   - **Title:** `pnr-alert`
+   - **URL:** `https://api.github.com/repos/shr-coditas/pnr-alert/actions/workflows/pnr-alert.yml/dispatches`
+   - **Execution schedule:** every 10 minutes.
+   - Turn on **Notify me when the execution of the cronjob fails**.
+5. **Advanced** tab:
+   - **Request method:** **POST** (the default is GET, which gives 404).
+   - **Headers:**
+
+     | Key | Value |
+     |---|---|
+     | `Authorization` | `Bearer github_pat_xxxx` (your token after `Bearer `) |
+     | `Accept` | `application/vnd.github+json` |
+     | `Content-Type` | `application/json` |
+
+   - **Request body:** `{"ref":"main"}`
+6. **Create** / **Save**.
+
+**Part 3: test**
+
+1. Open the job and click **Test run**. **`204 No Content`** means success. For 404 / 401 / 422 see
+   [Troubleshooting](#troubleshooting).
+2. On GitHub, **Actions** tab: a new `workflow_dispatch` run should appear within seconds.
+
+Optional command-line test (Git Bash). This triggers a real run:
+
+```bash
+curl -i -X POST \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  -d '{"ref":"main"}' \
+  https://api.github.com/repos/shr-coditas/pnr-alert/actions/workflows/pnr-alert.yml/dispatches
+```
+
+> **Note:** the URL is a POST-only API endpoint. Opening it in a browser always shows "Not Found"; that is
+> expected and does not mean the URL is wrong.
+
+### After the trip
+
+When the ticket is confirmed or cancelled, or the chart window is over, the workflow disables itself and
+cron-job.org starts reporting failures (HTTP 422). That is the signal to **delete the cron job** and
+**delete the GitHub token** (Settings, Developer settings, Fine-grained tokens).
