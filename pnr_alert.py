@@ -317,7 +317,8 @@ def check_once(pnr: str, statuses: list[str] | None = None) -> None:
     if kinds and all(k in ("CNF", "CANCELLED") for k in kinds):  # nothing left to wait for
         state.setdefault("_finished", {})[pnr] = "confirmed" if set(kinds) == {"CNF"} else "cancelled"
     save_state(state)
-    print(time.strftime("%H:%M:%S"), pnr, [describe(s) for s in statuses])
+    shown = pnr[:2] + "*" * max(len(pnr) - 4, 0) + pnr[-2:]  # keep the PNR out of logs
+    print(time.strftime("%H:%M:%S"), shown, [describe(s) for s in statuses])
 
 
 # ---------------------------------------------------------------- main
