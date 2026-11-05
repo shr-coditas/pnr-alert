@@ -1,0 +1,62 @@
+name: pnr-alert
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # GitHub may run this a few minutes late; the script allows for that
+  workflow_dispatch:           # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: read
+  actions: write               # so the job can disable this workflow once there is nothing left to watch
+
+concurrency:
+  group: pnr-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      # state.json remembers the last status and the API-call budget between runs
+      - uses: actions/cache@v4
+        with:
+          path: state.json
+          key: pnr-state-${{ github.run_id }}
+          restore-keys: pnr-state-
+
+      - name: Check PNR
+        id: run
+        env:
+          PNR: ${{ secrets.PNR }}
+          DEPARTURE: ${{ secrets.DEPARTURE }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          PNR_API_URL: ${{ secrets.PNR_API_URL }}
+          PNR_API_HEADERS: ${{ secrets.PNR_API_HEADERS }}
+          MONTHLY_BUDGET: "85"        # a few calls were already used while testing locally
+          CHART_RESERVE: "15"
+          CHART_POLL_MINUTES: "10"
+          TZ_OFFSET_MINUTES: "330"    # runners are UTC; DEPARTURE is India time
+        run: |
+          set +e
+          python pnr_alert.py --once
+          code=$?
+          if [ "$code" -eq 3 ]; then
+            echo "finished=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit $code
+
+      - name: Stop scheduling (ticket confirmed/cancelled, or chart window over)
+        if: steps.run.outputs.finished == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable pnr-alert.yml --repo "$GITHUB_REPOSITORY"
