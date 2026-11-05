@@ -43,6 +43,7 @@ jobs:
           PNR_API_HEADERS: ${{ secrets.PNR_API_HEADERS }}
           MONTHLY_BUDGET: "85"        # a few calls were already used while testing locally
           CHART_RESERVE: "15"
+          BASE_POLL_MINUTES: "60"     # check at least hourly until the chart windows
           CHART_POLL_MINUTES: "10"
           TZ_OFFSET_MINUTES: "330"    # runners are UTC; DEPARTURE is India time
         run: |

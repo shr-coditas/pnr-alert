@@ -211,6 +211,16 @@ def is_finished(pnr: str) -> bool:
 
 
 def schedule(now: datetime, dep: datetime | None) -> tuple[int | None, str]:
+    """Poll interval for `now`. BASE_POLL_MINUTES (e.g. 60) caps the slow early tiers so a train
+    that is only a couple of days away is checked at least that often; chart windows are unaffected."""
+    interval, phase = _tier(now, dep)
+    base = os.environ.get("BASE_POLL_MINUTES")
+    if base and interval is not None and phase not in ("chart1", "chart2"):
+        interval = min(interval, int(base))
+    return interval, phase
+
+
+def _tier(now: datetime, dep: datetime | None) -> tuple[int | None, str]:
     """(minutes between API calls, phase name). Waitlists move mostly via cancellations and at the
     two chart preparations (~4h and ~2h before departure), so poll rarely early and often then."""
     if dep is None:
