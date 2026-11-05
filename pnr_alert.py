@@ -116,6 +116,15 @@ class PnrNotYetGenerated(Exception):
     """API says 'PNR NOT YET GENERATED': temporary; keep polling."""
 
 
+class ApiHttpError(RuntimeError):
+    """The PNR API answered with an HTTP error status."""
+
+    def __init__(self, status: int, body: str):
+        super().__init__(f"PNR API returned HTTP {status}: {body}")
+        self.status = status
+        self.body = body
+
+
 def raise_if_known_failure(text: str) -> None:
     t = (text or "").upper()
     if "FLUSHED" in t:
@@ -139,7 +148,7 @@ def fetch_statuses(pnr: str) -> list[str]:
     resp = requests.get(url.replace("{pnr}", pnr), headers=headers, timeout=30)
     raise_if_known_failure(resp.text)  # these arrive as text, with either an HTTP 200 or an error code
     if not resp.ok:  # don't use raise_for_status(): its message includes the URL (and your PNR)
-        raise RuntimeError(f"PNR API returned HTTP {resp.status_code}: {resp.text[:300]}")
+        raise ApiHttpError(resp.status_code, resp.text[:300])
     statuses = find_current_statuses(resp.json())
     if not statuses:
         raise RuntimeError(
@@ -235,6 +244,50 @@ def estimate_plan(now: datetime, dep: datetime) -> list[tuple[datetime, str]]:
         t += timedelta(minutes=interval)
 
 
+def classify_failure(e: Exception) -> tuple[str, str]:
+    """(push title, push message) naming the specific error. 10-digit numbers (PNR) are masked."""
+    if isinstance(e, ApiHttpError):
+        hints = {
+            429: "API limit reached (HTTP 429): monthly quota or rate limit may be used up",
+            401: "API key rejected (HTTP 401): check the RapidAPI key",
+            403: "API access denied (HTTP 403): key or subscription problem",
+            404: "API endpoint not found (HTTP 404): check PNR_API_URL",
+        }
+        title = hints.get(e.status) or (
+            f"API server error (HTTP {e.status})" if e.status >= 500 else f"API error (HTTP {e.status})"
+        )
+        detail = e.body
+    elif isinstance(e, requests.Timeout):
+        title, detail = "API timed out", str(e)
+    elif isinstance(e, requests.ConnectionError):
+        title, detail = "Network error reaching the API", str(e)
+    else:
+        title, detail = f"PNR check failed ({type(e).__name__})", str(e)
+    msg = re.sub(r"\b\d{10}\b", "<PNR>", detail)[:200]
+    return title[:80], msg
+
+
+def report_failure(pnr: str, e: Exception) -> None:
+    """Push the error. Alerts on the 1st failure in a row, then every 6th (not every 10 minutes)."""
+    state = load_state()
+    count = state.setdefault("_failures", {}).get(pnr, 0) + 1
+    state["_failures"][pnr] = count
+    save_state(state)
+    title, msg = classify_failure(e)
+    print(f"check failed ({count} in a row): {title}: {msg}")
+    if count == 1 or count % 6 == 0:
+        suffix = f" (failing {count} checks in a row)" if count > 1 else ""
+        notify(f"PNR alert problem: {title}", msg + suffix, "rotating_light")
+
+
+def report_success(pnr: str) -> None:
+    state = load_state()
+    count = state.get("_failures", {}).pop(pnr, 0)
+    if count:
+        save_state(state)
+        notify("PNR checks working again", f"Recovered after {count} failed check(s).", "white_check_mark")
+
+
 def run_if_due(pnr: str, force: bool = False, now: datetime | None = None) -> bool:
     """Make an API call only if the schedule says it's time. Safe to run every few minutes."""
     now = now or _now()
@@ -276,6 +329,10 @@ def run_if_due(pnr: str, force: bool = False, now: datetime | None = None) -> bo
         notify("Invalid PNR", "The API says this PNR number is invalid. Check PNR in your settings. Tracking stopped.", "x")
     except PnrNotYetGenerated:
         print("PNR not generated yet; will retry on the next scheduled check")
+    except Exception as e:  # API down, quota hit, bad key, network, unexpected response...
+        report_failure(pnr, e)
+    else:
+        report_success(pnr)
     return True
 
 
