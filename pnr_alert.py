@@ -28,10 +28,14 @@ STATE_FILE = Path(__file__).with_name("state.json")
 # ----------------------------------------------------------------- config
 def load_env() -> None:
     """Tiny .env loader (avoids an extra dependency)."""
+    # Windows tools often add a hidden BOM (﻿) to files and piped text; strip it everywhere.
+    for k, v in list(os.environ.items()):
+        if "﻿" in v or v != v.strip():
+            os.environ[k] = v.replace("﻿", "").strip()
     env = Path(__file__).with_name(".env")
     if not env.exists():
         return
-    for line in env.read_text(encoding="utf-8").splitlines():
+    for line in env.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
