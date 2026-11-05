@@ -81,6 +81,56 @@ How often the API is called, by time left before departure (cloud settings: `BAS
 | 30 min to 2 h (second chart) | **10 min** | `chart2` |
 | under 30 min | stops (status is frozen after the final chart) | `done` |
 
+### Two layers: wake-up vs. API call
+
+The cron job (cron-job.org every 10 min, GitHub cron as backup) only **wakes the script up**. The script
+then decides whether to **call the PNR API**:
+
+```
+cron-job.org (every 10 min)
+   │  POST to GitHub
+   ▼
+GitHub Actions starts a run  →  python pnr_alert.py --once
+   │
+   ▼
+Script reads the time (IST) and how long until DEPARTURE
+   │
+   ├─ Which phase are we in?  → how often the API may be called (table above)
+   ├─ When was the last API call?  (state.json)
+   │
+   ├─ Not due yet  → exit quietly. No API call, no cost.   ← most wake-ups
+   │
+   └─ Due  → call the PNR API
+              → compare with the last status
+                  ├─ changed → push to your phone ("WL 34 → WL 30")
+                  └─ same    → stay silent
+              → save the new status and time
+```
+
+A check counts as due after `interval - 3` minutes (57 for hourly), so a wake-up that arrives a little late
+does not skip a whole slot.
+
+### Example timeline (departure 7 Nov 2026, 10:00 PM IST)
+
+| When (IST) | Time left before departure | API call every | Wake-ups that call the API |
+|---|---|---|---|
+| now → 7 Nov 6:00 PM | more than 4 h | **60 min** | about 1 in 6 |
+| 7 Nov 6:00 → 8:00 PM | 2–4 h (first chart) | **10 min** | every one |
+| 7 Nov 8:00 → 9:30 PM | 30 min–2 h (second chart) | **10 min** | every one |
+| after 9:30 PM | under 30 min | stops | "Polling finished" push, workflow disables itself |
+
+What it looked like on 5 Nov:
+
+- **9:20 PM:** wake-up. The last API call was at 5:07 PM, more than an hour earlier, so a check was due.
+  The API returned WL 34 and the "Waitlist dropped! WL 35 → WL 34" push was sent.
+- **9:30, 9:40, ... PM:** wake-ups. Less than an hour since the last call, so no API call.
+- **About 10:20 PM:** an hour has passed, so the next check is due and the API is called.
+
+Polling also ends early if the ticket is **confirmed** or **cancelled**: you get that push and the workflow
+disables itself.
+
+### Without `BASE_POLL_MINUTES`
+
 Without `BASE_POLL_MINUTES` the early phases are slower (24 h, 12 h, 6 h, 3 h, 1 h), which suits a ticket
 booked weeks ahead. See the planned number of calls for your own trip any time with `--plan`.
 
@@ -270,8 +320,15 @@ their rate limit, and BOM handling.
 ## Security and privacy
 
 - Secrets live in GitHub Secrets or your local `.env`, which is git-ignored. Do not commit them.
-- Use a **private** repo. The script masks your PNR in its log output (for example `12******90`) and GitHub masks secret
-  values in logs, but keeping the repo private is the real protection.
+- Use a **private** repo. Secrets (PNR, API key, ntfy topic) are hidden in either case, and the script masks
+  your PNR in its log output (for example `12******90`). But in a **public** repo anyone can read the
+  Actions history and logs: your waitlist status and every change ("WL 35 -> WL 34"), and from the run
+  pattern (10-minute API checks start 4 h before departure) roughly when you travel. Private keeps all of
+  that to you.
+- Trade-off: private repos get **2,000 free Actions minutes a month** (public ones are unlimited). Each run
+  is billed as at least 1 minute, so waking every 10 minutes uses about **144 minutes a day**. That is fine
+  for a trip a few days away (about 13 days of runs fit), but for a ticket booked weeks ahead, set the
+  cron-job.org job to every 30 or 60 minutes until a day or two before departure.
 - Your PNR is sent to the API provider you choose. Pick one you are comfortable sharing ticket details with.
 - ntfy.sh topics are public by name. A long random topic is a password. Anyone who learns it can read your alerts.
 - Passenger names are never printed or stored by this tool.
